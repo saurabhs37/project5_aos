@@ -7,6 +7,7 @@
 #include "proc.h"
 #include "elf.h"
 #include "spinlock.h"
+#include "mman.h"
 
 extern char data[];  // defined by kernel.ld
 pde_t *kpgdir;  // for use in scheduler()
@@ -390,8 +391,6 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
 // Implementation of mmap/munmap 
 
 // DS for bookkeeping mmap/munmap 
-#define ANONYMOUS_REGION 0
-#define FILE_BACKED_REGION 1
 
 struct spinlock mmap_lock;
 uint mmapRegionSize;
@@ -427,11 +426,46 @@ void mmapinit()
   mmapRegionSize = 0;
 }
 
+// allocuvmNoMap is modified version of allocuvm. In this function 
+// we are allocating new page but not mapping it to a physical memory
+/*
+static int
+allocuvmNoMap(pde_t *pgdir, uint oldsz, uint newsz)
+{
+  char *mem;
+  uint a;
+
+  if(newsz >= KERNBASE)
+    return 0;
+  if(newsz < oldsz)
+    return oldsz;
+
+  a = PGROUNDUP(oldsz);
+  for(; a < newsz; a += PGSIZE){
+    mem = kalloc();
+    if(mem == 0){
+      cprintf("allocuvm out of memory\n");
+      deallocuvm(pgdir, newsz, oldsz);
+      return 0;
+    }
+    memset(mem, 0, PGSIZE);
+    if(mappages(pgdir, (char*)a, PGSIZE, V2P(mem), PTE_W|PTE_U) < 0){
+      cprintf("allocuvm out of memory (2)\n");
+      deallocuvm(pgdir, newsz, oldsz);
+      kfree(mem);
+      return 0;
+    }
+    
+  }
+  return newsz;
+}
+*/
+
 void *mmapCore(struct proc *p, void* addr, int length, int prot, int flags, int fd, int offset)
 {
   pte_t *pte = 0;
   char *a = 0; // page align address
-  void *ret = 0; 
+  //void *ret = 0; 
   mmapInfo* node = 0;
   struct file* f = 0;
   int newFd = -1;
@@ -459,11 +493,12 @@ void *mmapCore(struct proc *p, void* addr, int length, int prot, int flags, int 
       a = (char*)(MMAPBASE + mmapRegionSize);
       lenInPageSz = (length - 1) / PGSIZE + 1;
     }
-    ret = (void*)allocuvm(p->pgdir, (uint)a, (uint)a+length);
-    if (ret == 0) {
-      release(&mmap_lock);
-      return 0;
-    }
+    //ret = (void*)allocuvm(p->pgdir, (uint)a, (uint)a+length);
+    //ret = (void*)allocuvmNoMap(p->pgdir, (uint)a, (uint)a+length);
+    //if (ret == 0) {
+    //  release(&mmap_lock);
+    //  return 0;
+    //}
     // allocuvm also zeroout the page
     // insert this mapping in process mmapInfoList;
     node = (mmapInfo*)kmalloc(sizeof(mmapInfo));
@@ -476,7 +511,7 @@ void *mmapCore(struct proc *p, void* addr, int length, int prot, int flags, int 
     if (fd < 0 || fd >= NOFILE || (f=p->ofile[fd]) == 0)
     {
       node->fd = -1;
-      node->region = ANONYMOUS_REGION;
+      node->region = MAP_ANONYMOUS;
     }
     else 
     {
@@ -488,7 +523,7 @@ void *mmapCore(struct proc *p, void* addr, int length, int prot, int flags, int 
         }
       }
       node->fd = newFd;
-      node->region = FILE_BACKED_REGION;
+      node->region = MAP_FILE;
     }
     mmapRegionSize += (lenInPageSz * PGSIZE); // increase size if page is allocated in mmap region
     release(&mmap_lock);
@@ -617,6 +652,35 @@ void copyMmapPages(struct proc *srcProc, struct proc *destProc)
   release(&mmap_lock);
 }
 
+int lazyMampPageAllocation(uint addr)
+{
+  // first check if addr is correspond to any mmap pages
+  struct proc *p = myproc();
+  mmapInfo *node = 0;
+  void *ret = 0;
+  uint a = 0;
+  if (p == 0 || p->killed)
+    return 0;
+  node = (mmapInfo*)p->mmapInfoList;
+  while(node) 
+  {
+    if (addr >= (uint)node->addr && addr < (uint)node->addr + node->length) 
+    {
+      // addr is mapped in mmap pages
+      // allocate this mmap page
+      a = PGROUNDDOWN(addr);
+      ret = (void*)allocuvm(p->pgdir, a, a+PGSIZE);
+      if (ret == 0)
+      {
+        //panic("lazyMmapPageAllocation");
+        return 0;
+      }
+      return 1;
+    }
+    node = (mmapInfo*)node->nxt;
+  }
+  return 0;
+}
 //PAGEBREAK!
 // Blank page.
 //PAGEBREAK!
