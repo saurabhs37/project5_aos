@@ -1,4 +1,4 @@
-#define PROT_WRITE 0
+#define PROT_WRITE 1
 
 
 #define MAP_ANONYMOUS 0
